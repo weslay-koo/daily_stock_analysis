@@ -239,28 +239,86 @@ python main.py --webui-only
 
 ---
 
-## 可选：Nginx 反向代理（绑定域名 / 80 端口）
+## 可选：Nginx 反向代理与安全加固（配合 Cloudflare / 隐藏真实 IP 与端口）
 
-如果你有域名，或者不想在地址里带 `:8000`，可以用 Nginx 做反向代理，把 80/443 端口流量转发给后端服务。
+如果你有域名，或者配置了 Cloudflare（CF）等 CDN/代理，建议通过 Nginx 做反向代理，并严格阻断公网通过 IP 和端口直接访问源站。
 
-### 安装 Nginx
+### 1. 避免通过 IP:8000 端口直接访问
 
-```bash
-# Ubuntu / Debian
-sudo apt update && sudo apt install -y nginx
+在默认配置下，Docker 可能会直接在宿主机公网 `0.0.0.0:8000` 监听。由于 Docker 直接操作 Linux iptables，常规 UFW 规则可能被绕过。
 
-# CentOS
-sudo yum install -y nginx
-```
+**正确做法**：
+1. **绑定本地回环**：在 `.env` 中设置 `API_BIND_IP=127.0.0.1`（或者直接修改 `docker/docker-compose.yml` 中的 ports 为 `127.0.0.1:8000:8000`），然后重新启动容器：
+   ```bash
+   docker-compose -f ./docker/docker-compose.yml down
+   docker-compose -f ./docker/docker-compose.yml up -d
+   ```
+2. **云服务器安全组**：在阿里云/腾讯云/AWS 等控制台的安全组规则中，**彻底删除或关闭 8000 端口**的入方向放行规则。
 
-### 配置文件示例
+这样外部网络将完全无法连接 8000 端口，仅宿主机本地的 Nginx 可以访问该端口。
 
-新建文件 `/etc/nginx/conf.d/stock-analyzer.conf`，内容如下（把 `your-domain.com` 改成你的域名或 IP）：
+### 2. Nginx 配置示例（禁止 IP 直接访问 + 支持 WebSocket + 还原 CF 真实 IP）
+
+新建或编辑 `/etc/nginx/conf.d/stock-analyzer.conf`：
 
 ```nginx
+# ----------------------------------------------------
+# 1. 默认服务器：拦截所有直接使用 IP 或未授权域名访问的请求
+# ----------------------------------------------------
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444; # 444 会直接关闭 TCP 连接且不返回任何数据，有效防御恶意扫描
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    # 需要提供证书（可使用自签名哑证书），直接丢弃连接
+    ssl_certificate /etc/nginx/ssl/dummy.crt;
+    ssl_certificate_key /etc/nginx/ssl/dummy.key;
+    return 444;
+}
+
+# ----------------------------------------------------
+# 2. 正常业务服务：仅响应指定域名
+# ----------------------------------------------------
 server {
     listen 80;
-    server_name your-domain.com;
+    # 若在源站配置了 SSL 证书（如 Cloudflare Origin CA），可开启 443：
+    # listen 443 ssl http2;
+    server_name your-domain.com; # 替换为你自己的域名
+
+    # 若使用 HTTPS：
+    # ssl_certificate /path/to/origin-cert.pem;
+    # ssl_certificate_key /path/to/origin-key.key;
+
+    # 还原 Cloudflare 代理的访客真实 IP
+    real_ip_header CF-Connecting-IP;
+    set_real_ip_from 173.245.48.0/20;
+    set_real_ip_from 103.21.244.0/22;
+    set_real_ip_from 103.22.200.0/22;
+    set_real_ip_from 103.31.4.0/22;
+    set_real_ip_from 141.101.64.0/18;
+    set_real_ip_from 108.162.192.0/18;
+    set_real_ip_from 190.93.240.0/20;
+    set_real_ip_from 188.114.96.0/20;
+    set_real_ip_from 197.234.240.0/22;
+    set_real_ip_from 198.41.128.0/17;
+    set_real_ip_from 162.158.0.0/15;
+    set_real_ip_from 104.16.0.0/13;
+    set_real_ip_from 104.24.0.0/14;
+    set_real_ip_from 172.64.0.0/13;
+    set_real_ip_from 131.0.72.0/22;
+    set_real_ip_from 2400:cb00::/32;
+    set_real_ip_from 2606:4700::/32;
+    set_real_ip_from 2803:f800::/32;
+    set_real_ip_from 2405:b500::/32;
+    set_real_ip_from 2405:8100::/32;
+    set_real_ip_from 2a06:98c0::/29;
+    set_real_ip_from 2c0f:f248::/32;
 
     location / {
         proxy_pass http://127.0.0.1:8000;
@@ -269,26 +327,35 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # 支持 WebSocket（Agent 对话页面需要）
+        # 支持 WebSocket（Agent 对话与实时事件流）
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
+
+        # 延长分析超时时间（防止长耗时分析或 SSE 流被 Nginx 中断）
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
     }
 }
 ```
 
-### 启用配置并重启 Nginx
+### 3. 启用配置并测试
 
 ```bash
-sudo nginx -t            # 检查配置有没有语法错误
+sudo nginx -t            # 检查配置语法
 sudo systemctl reload nginx
 ```
 
-配置成功后，直接用 `http://your-domain.com` 访问即可，不需要带端口号。
+### 4. 推荐方案：Cloudflare Tunnel（零开放入方向端口）
 
-> **使用 Nginx 后的注意事项**：
-> - 如果你开启了 Web 登录认证（`ADMIN_AUTH_ENABLED=true`），建议在 `.env` 中把 `TRUST_X_FORWARDED_FOR=true` 一并打开，否则系统可能无法正确识别真实 IP。该选项适用于**单层可信反向代理**（Nginx → App）部署；如果使用多级代理或 CDN（CDN → Nginx → App），登录限流的 key 可能退化为边缘代理 IP 而非真实客户端 IP，需根据实际拓扑评估。
-> - 如需 HTTPS，可以用 [Certbot](https://certbot.eff.org/) 自动申请免费的 Let's Encrypt 证书。
+如果追求极致安全，推荐使用 **Cloudflare Tunnel（cloudflared）**：
+- 云服务器**不需要在安全组中开放 80、443、8000 中的任何一个入方向端口**（可实现全关）。
+- 本地启动 `cloudflared` 守护进程与 Cloudflare 边缘建立安全出站连接，流量直接内网转发到 `http://127.0.0.1:8000`。
+- 彻底隐匿源站 IP，从物理网络层面免疫针对源站 IP 的扫描和直接攻击。
+
+> **注意事项**：
+> - 配合 Nginx / CF 代理并启用 Web 登录认证时，务必在 `.env` 中设置 `TRUST_X_FORWARDED_FOR=true`，以确保防暴力破解限流能正确拿到访客真实 IP。
+> - Cloudflare 控制台中的 SSL/TLS 模式建议设置为 **Full** 或 **Full (strict)**，并在「边缘证书」中开启「始终使用 HTTPS」。
 
 ---
 
