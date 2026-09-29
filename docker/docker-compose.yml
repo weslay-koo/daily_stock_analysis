@@ -64,6 +64,6 @@ services:
     container_name: stock-server
     command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "${API_PORT:-8000}"]
     # 若使用 network_mode: host，则以下 ports 映射无效，端口由 command 中的 --port 指定
-    # 若前置配置了 Nginx 等反向代理，建议在 .env 中设置 API_BIND_IP=127.0.0.1，避免外部直接通过公网 IP:端口绕过代理访问
+    # 绑定到 127.0.0.1，仅允许宿主机本地 Nginx 反代访问，杜绝公网直接通过 IP:8000 绕过 Cloudflare 访问
     ports:
-      - "${API_BIND_IP:-0.0.0.0}:${API_PORT:-8000}:${API_PORT:-8000}"
+      - "127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"
