@@ -121,6 +121,8 @@ docker-compose -f ./docker/docker-compose.yml up -d
 
 ## 如何在浏览器里打开界面
 
+> 💡 **安全提示**：`docker/docker-compose.yml` 默认将端口锁定在宿主机 `127.0.0.1`（仅供本机 Nginx 反向代理转发，防止公网通过 IP:8000 直接偷跑）。如果你的服务器已配置了 Nginx / 域名，请直接通过你的域名访问；如果暂未配置 Nginx 且想通过公网 IP:8000 直接访问，可将 `docker/docker-compose.yml` 中的 ports 调整为 `"${API_PORT:-8000}:${API_PORT:-8000}"`。
+
 服务启动后，在浏览器地址栏输入：
 
 ```
@@ -245,15 +247,14 @@ python main.py --webui-only
 
 ### 1. 避免通过 IP:8000 端口直接访问
 
-在默认配置下，Docker 可能会直接在宿主机公网 `0.0.0.0:8000` 监听。由于 Docker 直接操作 Linux iptables，常规 UFW 规则可能被绕过。
+常规 Docker 端口映射（如 `8000:8000`）会直接监听在宿主机所有网卡（`0.0.0.0`）。由于 Docker 会直接操作 Linux iptables，常规 UFW 防火墙规则会被绕过。
 
-**正确做法**：
-1. **绑定本地回环**：在 `.env` 中设置 `API_BIND_IP=127.0.0.1`（或者直接修改 `docker/docker-compose.yml` 中的 ports 为 `127.0.0.1:8000:8000`），然后重新启动容器：
-   ```bash
-   docker-compose -f ./docker/docker-compose.yml down
-   docker-compose -f ./docker/docker-compose.yml up -d
-   ```
-2. **云服务器安全组**：在阿里云/腾讯云/AWS 等控制台的安全组规则中，**彻底删除或关闭 8000 端口**的入方向放行规则。
+**防护机制**：
+1. **默认绑定本地回环**：项目的 `docker/docker-compose.yml` 已经默认配置为 `"127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"`，仅在宿主机本地回环接口监听 8000 端口。
+   - 外部网络直接访问 `http://<公网IP>:8000` 会被系统内核直接拒绝连接；
+   - 仅宿主机本机的 Nginx 反向代理可以通过 `http://127.0.0.1:8000` 转发访问；
+   - *(注：若确实不需要反代、需要直接公网访问 8000 端口，可将 `docker/docker-compose.yml` 中的 `127.0.0.1:` 前缀移除)*。
+2. **云服务器安全组**：在阿里云/腾讯云/AWS 等控制台的安全组规则中，**彻底删除或关闭 8000 端口**的入方向放行规则（双保险防御）。
 
 这样外部网络将完全无法连接 8000 端口，仅宿主机本地的 Nginx 可以访问该端口。
 
